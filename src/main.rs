@@ -51,8 +51,8 @@ impl Default for LayoutConfig {
         Self {
             node_width: 3,
             node_height: 3,
-            min_horizontal_spacing: 4,
-            min_vertical_spacing: 6,
+            min_horizontal_spacing: 6,  // Space between levels (left-to-right)
+            min_vertical_spacing: 4,    // Space between siblings (vertically)
             margin_top: 2,
             margin_left: 2,
         }
@@ -137,31 +137,30 @@ impl LayoutManager {
             layout.subtree_width = node_width;
             layout.subtree_height = node_height;
         } else {
-            // Calculate subtree width as sum of children widths + spacing
-            let child_widths: u16 = child_subtree_widths.iter().sum();
-            let spacing_width = if node.children.len() > 1 {
-                (node.children.len() - 1) as u16 * self.config.min_horizontal_spacing
+            // For horizontal layout: subtree width is node width + spacing + max child width
+            let max_child_width = child_subtree_widths.iter().max().copied().unwrap_or(0);
+            layout.subtree_width = node_width + self.config.min_horizontal_spacing + max_child_width;
+            
+            // For horizontal layout: subtree height is sum of children heights + spacing
+            let child_heights: u16 = child_subtree_heights.iter().sum();
+            let spacing_height = if node.children.len() > 1 {
+                (node.children.len() - 1) as u16 * self.config.min_vertical_spacing
             } else {
                 0
             };
             
-            layout.subtree_width = child_widths + spacing_width;
+            layout.subtree_height = child_heights + spacing_height;
             
-            // Ensure subtree width is at least as wide as this node
-            layout.subtree_width = layout.subtree_width.max(node_width);
-            
-            // Calculate subtree height as max child subtree height + vertical spacing
-            let max_child_height = child_subtree_heights.iter().max().copied().unwrap_or(0);
-            
-            layout.subtree_height = node_height + self.config.min_vertical_spacing + max_child_height;
+            // Ensure subtree height is at least as tall as this node
+            layout.subtree_height = layout.subtree_height.max(node_height);
         }
     }
 
     fn position_nodes(&mut self, tree: &TreeStructure, terminal_size: (u16, u16)) {
-        // Position root node at center top
+        // Position root node at left center
         let root_layout = &mut self.state.node_layouts[tree.root];
-        root_layout.x = terminal_size.0 / 2 - self.config.node_width / 2;
-        root_layout.y = self.config.margin_top;
+        root_layout.x = self.config.margin_left;
+        root_layout.y = terminal_size.1 / 2 - self.config.node_height / 2;
 
         // Position children recursively
         self.position_children(tree, tree.root);
@@ -175,35 +174,35 @@ impl LayoutManager {
             return;
         }
 
-        // Calculate total width needed for all children
-        let total_children_width: u16 = parent_node.children.iter()
-            .map(|&child_id| self.state.node_layouts[child_id].subtree_width)
+        // Calculate total height needed for all children
+        let total_children_height: u16 = parent_node.children.iter()
+            .map(|&child_id| self.state.node_layouts[child_id].subtree_height)
             .sum();
         let total_spacing = if parent_node.children.len() > 1 {
-            (parent_node.children.len() - 1) as u16 * self.config.min_horizontal_spacing
+            (parent_node.children.len() - 1) as u16 * self.config.min_vertical_spacing
         } else {
             0
         };
-        let total_width = total_children_width + total_spacing;
+        let total_height = total_children_height + total_spacing;
 
-        // Center children under parent
-        let parent_center_x = parent_layout.x + self.config.node_width / 2;
-        let start_x = parent_center_x.saturating_sub(total_width / 2);
+        // Center children to the right of parent
+        let parent_center_y = parent_layout.y + self.config.node_height / 2;
+        let start_y = parent_center_y.saturating_sub(total_height / 2);
 
-        let mut current_x = start_x;
+        let mut current_y = start_y;
         for &child_id in &parent_node.children {
             let child_layout = &mut self.state.node_layouts[child_id];
-            let child_subtree_width = child_layout.subtree_width;
+            let child_subtree_height = child_layout.subtree_height;
             
-            // Center the child within its allocated subtree width
-            child_layout.x = current_x + child_subtree_width / 2 - self.config.node_width / 2;
-            child_layout.y = parent_layout.y + self.config.min_vertical_spacing;
+            // Center the child within its allocated subtree height
+            child_layout.y = current_y + child_subtree_height / 2 - self.config.node_height / 2;
+            child_layout.x = parent_layout.x + self.config.min_horizontal_spacing;
 
             // Recursively position this child's children
             self.position_children(tree, child_id);
 
             // Move to next position
-            current_x += child_subtree_width + self.config.min_horizontal_spacing;
+            current_y += child_subtree_height + self.config.min_vertical_spacing;
         }
     }
 
