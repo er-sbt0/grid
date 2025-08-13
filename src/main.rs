@@ -1,233 +1,8 @@
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use grid::{LayoutConfig, LayoutManager, TreeNode, TreeStructure};
 use ratatui::{style::Color, text::Text};
 
-// Pure Tree Structure (Business Logic)
-#[derive(Clone)]
-struct TreeNode {
-    label: String,
-    children: Vec<usize>,
-}
-
-struct TreeStructure {
-    nodes: Vec<TreeNode>,
-    root: usize,
-    current_node: usize,
-    node_counter: usize,
-}
-
-// Layout Data (Presentation Logic)
-#[derive(Clone, Default)]
-struct NodeLayout {
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
-    subtree_width: u16,   // Total width needed for this subtree
-    subtree_height: u16,  // Total height needed for this subtree
-}
-
-// Layout State Management
-struct LayoutState {
-    node_layouts: Vec<NodeLayout>,
-    is_dirty: bool,
-    subtree_dirty: Vec<bool>,
-    last_terminal_size: (u16, u16),
-    layout_version: u64,
-}
-
-// Configuration
-#[derive(Clone)]
-struct LayoutConfig {
-    node_width: u16,
-    node_height: u16,
-    min_horizontal_spacing: u16,
-    min_vertical_spacing: u16,
-    margin_top: u16,
-    margin_left: u16,
-}
-
-impl Default for LayoutConfig {
-    fn default() -> Self {
-        Self {
-            node_width: 3,
-            node_height: 3,
-            min_horizontal_spacing: 6,  // Space between levels (left-to-right)
-            min_vertical_spacing: 4,    // Space between siblings (vertically)
-            margin_top: 2,
-            margin_left: 2,
-        }
-    }
-}
-
-// Layout Manager (Core Logic)
-struct LayoutManager {
-    state: LayoutState,
-    config: LayoutConfig,
-}
-
-impl LayoutManager {
-    fn new(config: LayoutConfig) -> Self {
-        Self {
-            state: LayoutState {
-                node_layouts: Vec::new(),
-                is_dirty: true,
-                subtree_dirty: Vec::new(),
-                last_terminal_size: (0, 0),
-                layout_version: 0,
-            },
-            config,
-        }
-    }
-
-    fn ensure_layout_valid(&mut self, tree: &TreeStructure, terminal_size: (u16, u16)) {
-        if self.state.is_dirty || self.terminal_size_changed(terminal_size) {
-            self.calculate_layout(tree, terminal_size);
-        }
-    }
-
-    fn terminal_size_changed(&self, terminal_size: (u16, u16)) -> bool {
-        self.state.last_terminal_size != terminal_size
-    }
-
-    fn calculate_layout(&mut self, tree: &TreeStructure, terminal_size: (u16, u16)) {
-        // Resize layout vectors to match tree size
-        self.state.node_layouts.resize(tree.nodes.len(), NodeLayout::default());
-        self.state.subtree_dirty.resize(tree.nodes.len(), false);
-
-        // Calculate subtree dimensions (post-order traversal)
-        self.calculate_subtree_dimensions(tree, tree.root);
-
-        // Position nodes (level-by-level)
-        self.position_nodes(tree, terminal_size);
-
-        // Mark as clean
-        self.state.is_dirty = false;
-        self.state.last_terminal_size = terminal_size;
-        self.state.layout_version += 1;
-    }
-
-    fn calculate_subtree_dimensions(&mut self, tree: &TreeStructure, node_id: usize) {
-        let node = &tree.nodes[node_id];
-        
-        // First, calculate dimensions for all children
-        for &child_id in &node.children {
-            self.calculate_subtree_dimensions(tree, child_id);
-        }
-
-        // Now calculate this node's dimensions
-        // Get node width and height first
-        let node_width = self.config.node_width;
-        let node_height = self.config.node_height;
-        
-        // Collect child dimensions before modifying current layout
-        let child_subtree_widths: Vec<u16> = node.children.iter()
-            .map(|&child_id| self.state.node_layouts[child_id].subtree_width)
-            .collect();
-        let child_subtree_heights: Vec<u16> = node.children.iter()
-            .map(|&child_id| self.state.node_layouts[child_id].subtree_height)
-            .collect();
-
-        // Now safely modify the current node's layout
-        let layout = &mut self.state.node_layouts[node_id];
-        layout.width = node_width;
-        layout.height = node_height;
-
-        if node.children.is_empty() {
-            // Leaf node
-            layout.subtree_width = node_width;
-            layout.subtree_height = node_height;
-        } else {
-            // For horizontal layout: subtree width is node width + spacing + max child width
-            let max_child_width = child_subtree_widths.iter().max().copied().unwrap_or(0);
-            layout.subtree_width = node_width + self.config.min_horizontal_spacing + max_child_width;
-            
-            // For horizontal layout: subtree height is sum of children heights + spacing
-            let child_heights: u16 = child_subtree_heights.iter().sum();
-            let spacing_height = if node.children.len() > 1 {
-                (node.children.len() - 1) as u16 * self.config.min_vertical_spacing
-            } else {
-                0
-            };
-            
-            layout.subtree_height = child_heights + spacing_height;
-            
-            // Ensure subtree height is at least as tall as this node
-            layout.subtree_height = layout.subtree_height.max(node_height);
-        }
-    }
-
-    fn position_nodes(&mut self, tree: &TreeStructure, terminal_size: (u16, u16)) {
-        // Position root node at left center
-        let root_layout = &mut self.state.node_layouts[tree.root];
-        root_layout.x = self.config.margin_left;
-        root_layout.y = terminal_size.1 / 2 - self.config.node_height / 2;
-
-        // Position children recursively
-        self.position_children(tree, tree.root);
-    }
-
-    fn position_children(&mut self, tree: &TreeStructure, parent_id: usize) {
-        let parent_node = &tree.nodes[parent_id];
-        let parent_layout = self.state.node_layouts[parent_id].clone();
-
-        if parent_node.children.is_empty() {
-            return;
-        }
-
-        // Calculate total height needed for all children
-        let total_children_height: u16 = parent_node.children.iter()
-            .map(|&child_id| self.state.node_layouts[child_id].subtree_height)
-            .sum();
-        let total_spacing = if parent_node.children.len() > 1 {
-            (parent_node.children.len() - 1) as u16 * self.config.min_vertical_spacing
-        } else {
-            0
-        };
-        let total_height = total_children_height + total_spacing;
-
-        // Center children to the right of parent
-        let parent_center_y = parent_layout.y + self.config.node_height / 2;
-        let start_y = parent_center_y.saturating_sub(total_height / 2);
-
-        let mut current_y = start_y;
-        for &child_id in &parent_node.children {
-            let child_layout = &mut self.state.node_layouts[child_id];
-            let child_subtree_height = child_layout.subtree_height;
-            
-            // Center the child within its allocated subtree height
-            child_layout.y = current_y + child_subtree_height / 2 - self.config.node_height / 2;
-            child_layout.x = parent_layout.x + self.config.min_horizontal_spacing;
-
-            // Recursively position this child's children
-            self.position_children(tree, child_id);
-
-            // Move to next position
-            current_y += child_subtree_height + self.config.min_vertical_spacing;
-        }
-    }
-
-    fn get_node_position(&self, node_id: usize) -> Option<(u16, u16)> {
-        if node_id < self.state.node_layouts.len() {
-            let layout = &self.state.node_layouts[node_id];
-            Some((layout.x, layout.y))
-        } else {
-            None
-        }
-    }
-
-    fn mark_dirty(&mut self) {
-        self.state.is_dirty = true;
-    }
-
-    fn mark_subtree_dirty(&mut self, node_id: usize) {
-        if node_id < self.state.subtree_dirty.len() {
-            self.state.subtree_dirty[node_id] = true;
-            self.state.is_dirty = true;
-        }
-    }
-}
-
-// Main application structure
+// Main Application Structure
 struct TreeApp {
     tree: TreeStructure,
     layout_manager: LayoutManager,
@@ -238,15 +13,7 @@ fn main() -> std::io::Result<()> {
     let mut terminal = ratatui::init();
 
     // Initialize tree structure with a single root node
-    let tree_structure = TreeStructure {
-        nodes: vec![TreeNode {
-            label: "Root".to_string(),
-            children: vec![],
-        }],
-        root: 0,
-        current_node: 0,
-        node_counter: 1,
-    };
+    let tree_structure = TreeStructure::new();
 
     // Initialize layout manager
     let layout_manager = LayoutManager::new(LayoutConfig::default());
@@ -270,12 +37,14 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut TreeApp) -> std::io::R
         // Draw the UI
         terminal.draw(|frame| {
             let area = frame.area();
-            
+
             // Ensure layout is valid before drawing
-            app.layout_manager.ensure_layout_valid(&app.tree, (area.width, area.height));
+            app.layout_manager
+                .ensure_layout_valid(&app.tree, (area.width, area.height));
 
             // Draw title
-            let title_text = Text::from("Dynamic Tree Graph - hjkl to navigate, Enter to expand leaf nodes, q to quit").style(Color::White);
+            let title_text = Text::from("Dynamic Tree Graph - hjkl:navigate, Enter:expand, q:quit")
+                .style(Color::White);
             let title_area = ratatui::layout::Rect {
                 x: 0,
                 y: 0,
@@ -290,7 +59,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut TreeApp) -> std::io::R
                     if child_idx < app.tree.nodes.len() {
                         if let (Some(parent_pos), Some(child_pos)) = (
                             app.layout_manager.get_node_position(node_idx),
-                            app.layout_manager.get_node_position(child_idx)
+                            app.layout_manager.get_node_position(child_idx),
                         ) {
                             draw_connection(frame, parent_pos, child_pos, area);
                         }
@@ -316,7 +85,14 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut TreeApp) -> std::io::R
     Ok(())
 }
 
-fn draw_node_at_position(frame: &mut ratatui::Frame, node: &TreeNode, x: u16, y: u16, is_current: bool, area: ratatui::layout::Rect) {
+fn draw_node_at_position(
+    frame: &mut ratatui::Frame,
+    node: &TreeNode,
+    x: u16,
+    y: u16,
+    is_current: bool,
+    area: ratatui::layout::Rect,
+) {
     let node_size = 3; // 3x3 square
 
     // Ensure the node fits within the terminal area
@@ -325,7 +101,11 @@ fn draw_node_at_position(frame: &mut ratatui::Frame, node: &TreeNode, x: u16, y:
     }
 
     // Choose color based on whether this is the current node
-    let color = if is_current { Color::Green } else { Color::Cyan };
+    let color = if is_current {
+        Color::Green
+    } else {
+        Color::Cyan
+    };
 
     // Draw the square node
     let lines = ["┌─┐", "│ │", "└─┘"];
@@ -337,7 +117,7 @@ fn draw_node_at_position(frame: &mut ratatui::Frame, node: &TreeNode, x: u16, y:
             let line_area = ratatui::layout::Rect {
                 x,
                 y: y_pos,
-                width: node_size as u16,
+                width: node_size,
                 height: 1,
             };
             frame.render_widget(text, line_area);
@@ -346,11 +126,15 @@ fn draw_node_at_position(frame: &mut ratatui::Frame, node: &TreeNode, x: u16, y:
 
     // Draw the label below the node
     if y + node_size + 1 < area.height {
-        let label_color = if is_current { Color::Green } else { Color::Yellow };
+        let label_color = if is_current {
+            Color::Green
+        } else {
+            Color::Yellow
+        };
         let label_text = Text::from(node.label.clone()).style(label_color);
         let label_area = ratatui::layout::Rect {
             x,
-            y: y + node_size as u16,
+            y: y + node_size,
             width: node.label.len() as u16,
             height: 1,
         };
@@ -436,16 +220,16 @@ fn handle_events(app: &mut TreeApp) -> std::io::Result<bool> {
     match event::read()? {
         Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
-            
+
             // Navigation with hjkl keys
             KeyCode::Char('h') => move_left(app),
             KeyCode::Char('j') => move_down(app),
             KeyCode::Char('k') => move_up(app),
             KeyCode::Char('l') => move_right(app),
-            
+
             // Expand node with Enter
             KeyCode::Enter => expand_current_node(app),
-            
+
             _ => {}
         },
         _ => {}
@@ -474,7 +258,11 @@ fn move_right(app: &mut TreeApp) {
 fn move_up(app: &mut TreeApp) {
     // Find siblings and move to previous sibling
     for parent in &app.tree.nodes {
-        if let Some(current_pos) = parent.children.iter().position(|&x| x == app.tree.current_node) {
+        if let Some(current_pos) = parent
+            .children
+            .iter()
+            .position(|&x| x == app.tree.current_node)
+        {
             if current_pos > 0 {
                 app.tree.current_node = parent.children[current_pos - 1];
                 return;
@@ -486,7 +274,11 @@ fn move_up(app: &mut TreeApp) {
 fn move_down(app: &mut TreeApp) {
     // Find siblings and move to next sibling
     for parent in &app.tree.nodes {
-        if let Some(current_pos) = parent.children.iter().position(|&x| x == app.tree.current_node) {
+        if let Some(current_pos) = parent
+            .children
+            .iter()
+            .position(|&x| x == app.tree.current_node)
+        {
             if current_pos + 1 < parent.children.len() {
                 app.tree.current_node = parent.children[current_pos + 1];
                 return;
@@ -496,34 +288,9 @@ fn move_down(app: &mut TreeApp) {
 }
 
 fn expand_current_node(app: &mut TreeApp) {
-    let current_node = &app.tree.nodes[app.tree.current_node];
-    
-    // Only expand if it's a leaf node (no children)
-    if current_node.children.is_empty() {
-        // Create two children
-        let child1_idx = app.tree.nodes.len();
-        let child2_idx = app.tree.nodes.len() + 1;
-        
-        let child1 = TreeNode {
-            label: format!("{}.1", app.tree.node_counter),
-            children: vec![],
-        };
-        
-        let child2 = TreeNode {
-            label: format!("{}.2", app.tree.node_counter),
-            children: vec![],
-        };
-        
-        app.tree.nodes.push(child1);
-        app.tree.nodes.push(child2);
-        
-        // Add children to current node
-        app.tree.nodes[app.tree.current_node].children.push(child1_idx);
-        app.tree.nodes[app.tree.current_node].children.push(child2_idx);
-        
-        app.tree.node_counter += 1;
-        
-        // Mark layout as needing recalculation
-        app.layout_manager.mark_subtree_dirty(app.tree.current_node);
-    }
+    // Use the tree's expand method
+    app.tree.expand_node(app.tree.current_node);
+
+    // Mark layout as needing recalculation
+    app.layout_manager.mark_subtree_dirty(app.tree.current_node);
 }
