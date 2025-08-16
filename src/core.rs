@@ -779,34 +779,29 @@ impl TreeStructure {
         }
     }
 
-    pub fn expand_node(&mut self, node_id: usize) {
-        if node_id >= self.nodes.len() {
+    pub fn expand_node(&mut self, node_id: usize, num_children: usize) {
+        if node_id >= self.nodes.len() || num_children == 0 {
             return;
         }
 
         // Only expand if it's a leaf node (no children)
         if self.nodes[node_id].children.is_empty() {
-            // Create two children
-            let child1_idx = self.nodes.len();
-            let child2_idx = self.nodes.len() + 1;
+            // Create the specified number of children
+            let mut child_indices = Vec::new();
 
-            let child1 = TreeNode {
-                label: format!("{}.1", self.node_counter),
-                children: vec![],
-            };
+            for i in 1..=num_children {
+                let child_idx = self.nodes.len();
+                let child = TreeNode {
+                    label: format!("{}.{}", self.node_counter, i),
+                    children: vec![],
+                };
 
-            let child2 = TreeNode {
-                label: format!("{}.2", self.node_counter),
-                children: vec![],
-            };
+                self.nodes.push(child);
+                child_indices.push(child_idx);
+            }
 
-            self.nodes.push(child1);
-            self.nodes.push(child2);
-
-            // Add children to current node
-            self.nodes[node_id].children.push(child1_idx);
-            self.nodes[node_id].children.push(child2_idx);
-
+            // Add all children to current node
+            self.nodes[node_id].children = child_indices;
             self.node_counter += 1;
         }
     }

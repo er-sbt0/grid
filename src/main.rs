@@ -43,8 +43,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut TreeApp) -> std::io::R
                 .ensure_layout_valid(&app.tree, (area.width, area.height));
 
             // Draw title
-            let title_text = Text::from("Dynamic Tree Graph - hjkl:navigate, Enter:expand, q:quit")
-                .style(Color::White);
+            let title_text = Text::from(
+                "Dynamic Tree Graph - hjkl:navigate, 1-4:expand with N children, q:quit",
+            )
+            .style(Color::White);
             let title_area = ratatui::layout::Rect {
                 x: 0,
                 y: 0,
@@ -227,8 +229,14 @@ fn handle_events(app: &mut TreeApp) -> std::io::Result<bool> {
             KeyCode::Char('k') => move_up(app),
             KeyCode::Char('l') => move_right(app),
 
-            // Expand node with Enter
-            KeyCode::Enter => expand_current_node(app),
+            // Expand node with different numbers of children
+            KeyCode::Char('1') => expand_current_node(app, 1),
+            KeyCode::Char('2') => expand_current_node(app, 2),
+            KeyCode::Char('3') => expand_current_node(app, 3),
+            KeyCode::Char('4') => expand_current_node(app, 4),
+
+            // Keep Enter for backward compatibility (2 children)
+            KeyCode::Enter => expand_current_node(app, 2),
 
             _ => {}
         },
@@ -287,9 +295,9 @@ fn move_down(app: &mut TreeApp) {
     }
 }
 
-fn expand_current_node(app: &mut TreeApp) {
-    // Use the tree's expand method
-    app.tree.expand_node(app.tree.current_node);
+fn expand_current_node(app: &mut TreeApp, num_children: usize) {
+    // Use the tree's expand method with specified number of children
+    app.tree.expand_node(app.tree.current_node, num_children);
 
     // Mark layout as needing recalculation
     app.layout_manager.mark_subtree_dirty(app.tree.current_node);
