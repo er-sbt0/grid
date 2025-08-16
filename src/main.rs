@@ -6,7 +6,6 @@ use ratatui::{style::Color, text::Text};
 struct TreeApp {
     tree: TreeStructure,
     layout_manager: LayoutManager,
-    viewport_offset: (i32, i32), // (x, y) offset for panning the view
 }
 
 fn main() -> std::io::Result<()> {
@@ -23,7 +22,6 @@ fn main() -> std::io::Result<()> {
     let mut app = TreeApp {
         tree: tree_structure,
         layout_manager,
-        viewport_offset: (0, 0), // Start with no offset
     };
 
     let result = run(&mut terminal, &mut app);
@@ -44,9 +42,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut TreeApp) -> std::io::R
             app.layout_manager
                 .ensure_layout_valid(&app.tree, (area.width, area.height));
 
-                        // Draw title
+            // Draw title
             let title_text = Text::from(
-                "Tree Graph - Arrows:pan view, hjkl:navigate nodes, 1-4:expand with N children, q:quit",
+                "Dynamic Tree Graph - hjkl:navigate, 1-4:expand with N children, q:quit",
             )
             .style(Color::White);
             let title_area = ratatui::layout::Rect {
@@ -57,7 +55,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut TreeApp) -> std::io::R
             };
             frame.render_widget(title_text, title_area);
 
-            // Draw connections first (so they appear behind nodes) with viewport offset
+            // Draw connections first (so they appear behind nodes)
             for (node_idx, node) in app.tree.nodes.iter().enumerate() {
                 for &child_idx in &node.children {
                     if child_idx < app.tree.nodes.len() {
@@ -65,30 +63,17 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut TreeApp) -> std::io::R
                             app.layout_manager.get_node_position(node_idx),
                             app.layout_manager.get_node_position(child_idx),
                         ) {
-                            // Apply viewport offset to both positions
-                            let adjusted_parent = (
-                                (parent_pos.0 as i32 + app.viewport_offset.0) as u16,
-                                (parent_pos.1 as i32 + app.viewport_offset.1) as u16,
-                            );
-                            let adjusted_child = (
-                                (child_pos.0 as i32 + app.viewport_offset.0) as u16,
-                                (child_pos.1 as i32 + app.viewport_offset.1) as u16,
-                            );
-                            draw_connection(frame, adjusted_parent, adjusted_child, area);
+                            draw_connection(frame, parent_pos, child_pos, area);
                         }
                     }
                 }
             }
 
-            // Draw nodes using layout positions with viewport offset
+            // Draw nodes using layout positions
             for (idx, node) in app.tree.nodes.iter().enumerate() {
                 if let Some((x, y)) = app.layout_manager.get_node_position(idx) {
-                    // Apply viewport offset
-                    let adjusted_x = (x as i32 + app.viewport_offset.0) as u16;
-                    let adjusted_y = (y as i32 + app.viewport_offset.1) as u16;
-                    
                     let is_current = idx == app.tree.current_node;
-                    draw_node_at_position(frame, node, adjusted_x, adjusted_y, is_current, area);
+                    draw_node_at_position(frame, node, x, y, is_current, area);
                 }
             }
         })?;
@@ -238,13 +223,7 @@ fn handle_events(app: &mut TreeApp) -> std::io::Result<bool> {
         Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
 
-            // Navigation with arrow keys (pan view) and hjkl keys (navigate nodes)
-            KeyCode::Left => pan_view_left(app),
-            KeyCode::Right => pan_view_right(app),
-            KeyCode::Up => pan_view_up(app),
-            KeyCode::Down => pan_view_down(app),
-            
-            // Keep hjkl for node navigation
+            // Navigation with hjkl keys
             KeyCode::Char('h') => move_left(app),
             KeyCode::Char('j') => move_down(app),
             KeyCode::Char('k') => move_up(app),
@@ -322,21 +301,4 @@ fn expand_current_node(app: &mut TreeApp, num_children: usize) {
 
     // Mark layout as needing recalculation
     app.layout_manager.mark_subtree_dirty(app.tree.current_node);
-}
-
-// Viewport panning functions - move the entire view
-fn pan_view_left(app: &mut TreeApp) {
-    app.viewport_offset.0 += 5; // Move view left by moving content right
-}
-
-fn pan_view_right(app: &mut TreeApp) {
-    app.viewport_offset.0 -= 5; // Move view right by moving content left
-}
-
-fn pan_view_up(app: &mut TreeApp) {
-    app.viewport_offset.1 += 3; // Move view up by moving content down
-}
-
-fn pan_view_down(app: &mut TreeApp) {
-    app.viewport_offset.1 -= 3; // Move view down by moving content up
 }
