@@ -236,6 +236,12 @@ impl LayoutManager {
             self.set_internal_position(tree, node_id);
         }
         
+        // Debug output
+        let node_label = &tree.nodes[node_id].label;
+        let prelim = self.get_rt_prelim(node_id);
+        let subtree_width = self.get_rt_subtree_width(node_id);
+        println!("Node {} ({}): prelim={}, subtree_width={}", node_id, node_label, prelim, subtree_width);
+        
         // Recalculate subtree dimensions after positioning
         self.calculate_subtree_dimensions(tree, node_id);
     }
@@ -304,9 +310,10 @@ impl LayoutManager {
             self.set_rt_prelim(node_id, child_prelim);
             self.set_rt_modifier(node_id, 0.0);
         } else if children.len() >= 2 {
-            // Multiple children: center between first and last child
+            // First, position children with proper separation
             self.position_children_with_separation(tree, node_id, node_separation);
             
+            // Then center parent between first and last child
             let first_child_pos = self.get_rt_prelim(children[0]);
             let last_child_pos = self.get_rt_prelim(children[children.len() - 1]);
             let midpoint = (first_child_pos + last_child_pos) / 2.0;
@@ -323,8 +330,11 @@ impl LayoutManager {
             return;
         }
         
-        // Position first child at origin
+        println!("Positioning children of node {} ({})", parent_id, tree.nodes[parent_id].label);
+        
+        // Position first child at origin relative to parent
         self.set_rt_prelim(children[0], 0.0);
+        println!("  Child {} positioned at prelim=0", children[0]);
         
         // Position subsequent children with proper separation
         for i in 1..children.len() {
@@ -338,6 +348,9 @@ impl LayoutManager {
             // Position current child with separation from previous subtree
             let new_pos = prev_pos + prev_subtree_width + separation;
             self.set_rt_prelim(current_child, new_pos);
+            
+            println!("  Child {} positioned at prelim={} (prev_pos={}, prev_width={}, sep={})", 
+                     current_child, new_pos, prev_pos, prev_subtree_width, separation);
         }
     }
 
