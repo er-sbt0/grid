@@ -35,6 +35,11 @@ pub struct RTNodeData {
     // Final coordinates
     pub final_x: f32,
     pub final_y: f32,
+    
+    // Contour tracking for conflict detection
+    pub left_contour: Vec<f32>,   // Left contour at each level relative to this node
+    pub right_contour: Vec<f32>,  // Right contour at each level relative to this node
+    pub contour_depth: usize,     // Number of levels in contour
 }
 
 // Deprecated: Keep for migration compatibility
@@ -249,6 +254,9 @@ impl LayoutManager {
                 subtree_height: 0.0,
                 final_x: 0.0,
                 final_y: 0.0,
+                left_contour: Vec::new(),
+                right_contour: Vec::new(),
+                contour_depth: 0,
             });
         }
     }
@@ -262,15 +270,20 @@ impl LayoutManager {
         }
 
         if children.is_empty() {
-            self.set_leaf_position(node_id);
+            // Leaf node
+            self.set_leaf_position_with_contour(node_id);
         } else {
-            self.set_internal_position_with_proper_spacing(tree, node_id);
+            // Internal node - position children with contour-based conflict detection
+            self.set_internal_position_with_contours(tree, node_id);
         }
+        
+        // Calculate contours for this subtree
+        self.calculate_contours(tree, node_id);
     }
 
-    fn set_internal_position_with_proper_spacing(&mut self, tree: &TreeStructure, node_id: usize) {
+    fn set_internal_position_with_contours(&mut self, tree: &TreeStructure, node_id: usize) {
         let children = &tree.nodes[node_id].children;
-        let separation = self.get_rt_node_separation();
+        let min_separation = self.get_rt_node_separation();
 
         if children.len() == 1 {
             // Single child: position directly above it
@@ -278,8 +291,8 @@ impl LayoutManager {
             self.set_rt_prelim(node_id, child_prelim);
             self.set_rt_modifier(node_id, 0.0);
         } else if children.len() >= 2 {
-            // Position children with conflict-aware spacing
-            self.position_children_with_conflict_detection(tree, node_id);
+            // Multiple children: use contour-based conflict detection
+            self.position_children_with_contour_detection(tree, node_id, min_separation);
 
             // Center parent between first and last child
             let first_child_pos = self.get_rt_prelim(children[0]);
@@ -287,40 +300,130 @@ impl LayoutManager {
             let midpoint = (first_child_pos + last_child_pos) / 2.0;
 
             self.set_rt_prelim(node_id, midpoint);
-            
-            // Set modifier to center children around parent
             self.set_rt_modifier(node_id, -midpoint);
         } else {
-            // No children (leaf node case, should not happen here)
+            // No children
             self.set_rt_prelim(node_id, 0.0);
             self.set_rt_modifier(node_id, 0.0);
         }
     }
 
-    fn position_children_with_conflict_detection(&mut self, tree: &TreeStructure, parent_id: usize) {
+    fn position_children_with_contour_detection(&mut self, tree: &TreeStructure, parent_id: usize, min_separation: f32) {
         let children = &tree.nodes[parent_id].children;
-        let min_separation = self.get_rt_node_separation();
-
+        
         if children.is_empty() {
             return;
         }
 
-        // Start with the first child at position 0
+        // Position first child at origin
         self.set_rt_prelim(children[0], 0.0);
 
-        // Position subsequent children, ensuring no conflicts
+        // Position subsequent children using contour-based conflict detection
         for i in 1..children.len() {
-            let prev_child = children[i - 1];
+            let left_sibling = children[i - 1];
             let current_child = children[i];
 
-            // Calculate the required separation for this child based on subtree conflicts
-            let required_separation = self.calculate_required_separation(tree, prev_child, current_child);
+            // Find the minimum distance to avoid conflicts between left sibling's right contour
+            // and current child's left contour
+            let min_distance = self.find_min_distance_between_subtrees(left_sibling, current_child, min_separation);
             
-            // Position current child at appropriate distance from previous child
-            let prev_pos = self.get_rt_prelim(prev_child);
-            let new_pos = prev_pos + required_separation;
+            // Position current child at the calculated distance from left sibling
+            let left_sibling_pos = self.get_rt_prelim(left_sibling);
+            let new_pos = left_sibling_pos + min_distance;
             
             self.set_rt_prelim(current_child, new_pos);
+        }
+    }
+
+    fn find_min_distance_between_subtrees(&self, left_node: usize, right_node: usize, min_separation: f32) -> f32 {
+        let left_data = &self.state.node_layouts[left_node].rt_data.as_ref().unwrap();
+        let right_data = &self.state.node_layouts[right_node].rt_data.as_ref().unwrap();
+        
+        let left_contour = &left_data.right_contour;
+        let right_contour = &right_data.left_contour;
+        
+        println!("Contour detection between nodes {} and {}", left_node, right_node);
+        println!("Left contour (right edge): {:?}", left_contour);
+        println!("Right contour (left edge): {:?}", right_contour);
+        
+        let max_depth = left_contour.len().max(right_contour.len());
+        let mut max_separation_needed = min_separation;
+        
+        // Walk down both contours to find the maximum separation needed
+        for level in 0..max_depth {
+            let left_edge = if level < left_contour.len() {
+                left_contour[level]
+            } else {
+                // Use the last known contour value
+                left_contour.last().copied().unwrap_or(0.0)
+            };
+            
+            let right_edge = if level < right_contour.len() {
+                right_contour[level]
+            } else {
+                // Use the last known contour value
+                right_contour.last().copied().unwrap_or(0.0)
+            };
+            
+            // Calculate the separation needed at this level
+            let separation_needed = left_edge - right_edge + min_separation;
+            println!("Level {}: left_edge={:.2}, right_edge={:.2}, separation_needed={:.2}", 
+                     level, left_edge, right_edge, separation_needed);
+            max_separation_needed = max_separation_needed.max(separation_needed);
+        }
+        
+        println!("Final separation: {:.2}", max_separation_needed);
+        max_separation_needed
+    }
+
+    fn calculate_contours(&mut self, tree: &TreeStructure, node_id: usize) {
+        let children = &tree.nodes[node_id].children;
+        let half_width = self.config.node_width as f32 / 2.0;
+        
+        if children.is_empty() {
+            // Leaf node - contours already set in set_leaf_position_with_contour
+            return;
+        }
+        
+        // For internal nodes, merge contours from all children
+        let mut merged_left_contour = vec![-half_width]; // Node itself at level 0
+        let mut merged_right_contour = vec![half_width];
+        let mut max_depth = 1;
+        
+        for &child_id in children {
+            let child_prelim = self.get_rt_prelim(child_id);
+            let child_data = self.state.node_layouts[child_id].rt_data.as_ref().unwrap();
+            
+            // Extend contours to accommodate this child's depth
+            let child_depth = child_data.contour_depth;
+            let total_child_depth = child_depth + 1; // +1 for the level between parent and child
+            
+            // Extend merged contours if needed
+            while merged_left_contour.len() < total_child_depth {
+                merged_left_contour.push(merged_left_contour.last().copied().unwrap_or(-half_width));
+                merged_right_contour.push(merged_right_contour.last().copied().unwrap_or(half_width));
+            }
+            
+            // Merge child's contours into parent's contours
+            for level in 0..child_depth {
+                let contour_level = level + 1; // Offset by 1 since child is one level down
+                if contour_level < merged_left_contour.len() {
+                    let child_left = child_prelim + child_data.left_contour[level];
+                    let child_right = child_prelim + child_data.right_contour[level];
+                    
+                    merged_left_contour[contour_level] = merged_left_contour[contour_level].min(child_left);
+                    merged_right_contour[contour_level] = merged_right_contour[contour_level].max(child_right);
+                }
+            }
+            
+            max_depth = max_depth.max(total_child_depth);
+        }
+        
+        // Update this node's contour data
+        if let Some(ref mut rt_data) = self.state.node_layouts[node_id].rt_data {
+            rt_data.left_contour = merged_left_contour;
+            rt_data.right_contour = merged_right_contour;
+            rt_data.contour_depth = max_depth;
         }
     }
 
@@ -374,6 +477,20 @@ impl LayoutManager {
         // Leaf nodes are positioned at origin relative to their parent
         self.set_rt_prelim(node_id, 0.0);
         self.set_rt_modifier(node_id, 0.0);
+    }
+    
+    fn set_leaf_position_with_contour(&mut self, node_id: usize) {
+        // Leaf nodes are positioned at origin relative to their parent
+        self.set_rt_prelim(node_id, 0.0);
+        self.set_rt_modifier(node_id, 0.0);
+        
+        // Initialize contours for leaf node
+        let half_width = self.config.node_width as f32 / 2.0;
+        if let Some(ref mut rt_data) = self.state.node_layouts[node_id].rt_data {
+            rt_data.left_contour = vec![-half_width];
+            rt_data.right_contour = vec![half_width];
+            rt_data.contour_depth = 1;
+        }
     }
 
     fn set_internal_position(&mut self, tree: &TreeStructure, node_id: usize) {
