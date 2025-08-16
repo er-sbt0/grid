@@ -261,14 +261,81 @@ impl LayoutManager {
             self.rt_first_walk(tree, child_id);
         }
 
-        // ONLY do positioning logic - NO dimension calculation
         if children.is_empty() {
             self.set_leaf_position(node_id);
         } else {
-            self.set_internal_position(tree, node_id);
+            self.set_internal_position_with_proper_spacing(tree, node_id);
+        }
+    }
+
+    fn set_internal_position_with_proper_spacing(&mut self, tree: &TreeStructure, node_id: usize) {
+        let children = &tree.nodes[node_id].children;
+        let separation = self.get_rt_node_separation();
+
+        if children.len() == 1 {
+            // Single child: position directly above it
+            let child_prelim = self.get_rt_prelim(children[0]);
+            self.set_rt_prelim(node_id, child_prelim);
+            self.set_rt_modifier(node_id, 0.0);
+        } else if children.len() >= 2 {
+            // Position children with conflict-aware spacing
+            self.position_children_with_conflict_detection(tree, node_id);
+
+            // Center parent between first and last child
+            let first_child_pos = self.get_rt_prelim(children[0]);
+            let last_child_pos = self.get_rt_prelim(children[children.len() - 1]);
+            let midpoint = (first_child_pos + last_child_pos) / 2.0;
+
+            self.set_rt_prelim(node_id, midpoint);
+            
+            // Set modifier to center children around parent
+            self.set_rt_modifier(node_id, -midpoint);
+        } else {
+            // No children (leaf node case, should not happen here)
+            self.set_rt_prelim(node_id, 0.0);
+            self.set_rt_modifier(node_id, 0.0);
+        }
+    }
+
+    fn position_children_with_conflict_detection(&mut self, tree: &TreeStructure, parent_id: usize) {
+        let children = &tree.nodes[parent_id].children;
+        let min_separation = self.get_rt_node_separation();
+
+        if children.is_empty() {
+            return;
         }
 
-        // DO NOT call calculate_subtree_dimensions here!
+        // Start with the first child at position 0
+        self.set_rt_prelim(children[0], 0.0);
+
+        // Position subsequent children, ensuring no conflicts
+        for i in 1..children.len() {
+            let prev_child = children[i - 1];
+            let current_child = children[i];
+
+            // Calculate the required separation for this child based on subtree conflicts
+            let required_separation = self.calculate_required_separation(tree, prev_child, current_child);
+            
+            // Position current child at appropriate distance from previous child
+            let prev_pos = self.get_rt_prelim(prev_child);
+            let new_pos = prev_pos + required_separation;
+            
+            self.set_rt_prelim(current_child, new_pos);
+        }
+    }
+
+    fn calculate_required_separation(&self, tree: &TreeStructure, left_child: usize, right_child: usize) -> f32 {
+        let min_separation = self.get_rt_node_separation();
+        
+        // Calculate the span needed for each subtree
+        let left_width = self.estimate_subtree_width(tree, left_child);
+        let right_width = self.estimate_subtree_width(tree, right_child);
+        
+        // Calculate center-to-center distance needed
+        let required_distance = (left_width / 2.0) + min_separation + (right_width / 2.0);
+        
+        // Ensure we have at least the minimum separation
+        required_distance.max(min_separation + self.config.node_width as f32)
     }
 
     fn rt_second_walk(&mut self, tree: &TreeStructure, node_id: usize, modifier: f32, depth: f32) {
@@ -318,8 +385,8 @@ impl LayoutManager {
             self.set_rt_prelim(node_id, child_prelim);
             self.set_rt_modifier(node_id, 0.0);
         } else if children.len() >= 2 {
-            // Position children with fixed separation
-            self.position_children_with_fixed_separation(tree, node_id);
+            // Position children with conflict resolution
+            self.position_children_with_conflict_resolution(tree, node_id);
 
             // Center parent between first and last child
             let first_child_pos = self.get_rt_prelim(children[0]);
@@ -331,13 +398,75 @@ impl LayoutManager {
         }
     }
 
+    fn position_children_with_conflict_resolution(&mut self, tree: &TreeStructure, parent_id: usize) {
+        let children = &tree.nodes[parent_id].children;
+        let separation = self.get_rt_node_separation();
+
+        if children.is_empty() {
+            return;
+        }
+
+        // Position first child at origin
+        self.set_rt_prelim(children[0], 0.0);
+
+        // Position subsequent children with proper separation, accounting for subtree widths
+        for i in 1..children.len() {
+            let prev_child = children[i - 1];
+            let current_child = children[i];
+            
+            // Calculate the rightmost edge of the previous subtree
+            let prev_subtree_right_edge = self.calculate_subtree_right_edge(tree, prev_child);
+            
+            // Position current child with minimum separation from previous subtree
+            let new_pos = prev_subtree_right_edge + separation;
+            self.set_rt_prelim(current_child, new_pos);
+        }
+    }
+
+    fn calculate_subtree_right_edge(&self, tree: &TreeStructure, node_id: usize) -> f32 {
+        // For now, use a simple heuristic: node position + estimated subtree width
+        let node_pos = self.get_rt_prelim(node_id);
+        let estimated_width = self.estimate_subtree_width(tree, node_id);
+        node_pos + estimated_width
+    }
+
+    fn estimate_subtree_width(&self, tree: &TreeStructure, node_id: usize) -> f32 {
+        let children = &tree.nodes[node_id].children;
+        
+        if children.is_empty() {
+            // Leaf node - use full node width
+            self.config.node_width as f32
+        } else {
+            // Internal node - estimate based on children count and spacing
+            let separation = self.get_rt_node_separation();
+            let child_count = children.len() as f32;
+            
+            // Each child takes node_width + separation, except the last child
+            let estimated_width = child_count * self.config.node_width as f32 + (child_count - 1.0) * separation;
+            
+            // Return at least the minimum node width
+            estimated_width.max(self.config.node_width as f32)
+        }
+    }
+
     fn position_children_with_fixed_separation(&mut self, tree: &TreeStructure, parent_id: usize) {
         let children = &tree.nodes[parent_id].children;
         let separation = self.get_rt_node_separation();
 
-        // Position children with fixed separation
+        if children.is_empty() {
+            return;
+        }
+
+        // Calculate total width needed for all children
+        let total_children = children.len() as f32;
+        let total_width = total_children * self.config.node_width as f32 + (total_children - 1.0) * separation;
+        
+        // Start positioning from negative half-width to center children around parent
+        let start_offset = -total_width / 2.0 + (self.config.node_width as f32 / 2.0);
+
+        // Position children with fixed separation, centered around the parent
         for (i, &child_id) in children.iter().enumerate() {
-            let position = i as f32 * (self.config.node_width as f32 + separation);
+            let position = start_offset + i as f32 * (self.config.node_width as f32 + separation);
             self.set_rt_prelim(child_id, position);
         }
     }
