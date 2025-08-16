@@ -588,51 +588,25 @@ impl LayoutManager {
             return;
         }
 
-        // Find bounds of the layout
-        let mut min_x = f32::INFINITY;
-        let mut max_x = f32::NEG_INFINITY;
-        let mut min_y = f32::INFINITY;
-        let mut max_y = f32::NEG_INFINITY;
+        // Get root position in layout coordinates
+        let root_layout_x = self.get_rt_final_x(tree.root);
+        let root_layout_y = self.get_rt_final_y(tree.root);
 
-        for layout in &self.state.node_layouts {
-            if let Some(ref rt_data) = layout.rt_data {
-                min_x = min_x.min(rt_data.final_x);
-                max_x = max_x.max(rt_data.final_x);
-                min_y = min_y.min(rt_data.final_y);
-                max_y = max_y.max(rt_data.final_y);
-            }
-        }
-
-        // Calculate scaling and centering
-        let layout_width = max_x - min_x;
-        let layout_height = max_y - min_y;
-
-        let available_width = terminal_size.0.saturating_sub(self.config.margin_left * 2) as f32;
-        let available_height = terminal_size.1.saturating_sub(self.config.margin_top * 2) as f32;
-
-        let scale_x = if layout_width > 0.0 {
-            available_width / layout_width
-        } else {
-            1.0
-        };
-        let scale_y = if layout_height > 0.0 {
-            available_height / layout_height
-        } else {
-            1.0
-        };
-        let scale = scale_x.min(scale_y).min(1.0); // Don't scale up
-
-        let offset_x =
-            self.config.margin_left as f32 + (available_width - layout_width * scale) / 2.0;
-        let offset_y =
-            self.config.margin_top as f32 + (available_height - layout_height * scale) / 2.0;
+        // Fixed root position in terminal coordinates (centered horizontally, near top)
+        let fixed_root_x = self.config.margin_left + 10; // Fixed horizontal position
+        let fixed_root_y = self.config.margin_top + 5;   // Fixed vertical position
 
         // Convert to terminal coordinates for left-to-right layout
-        for layout in &mut self.state.node_layouts {
+        for (_node_id, layout) in self.state.node_layouts.iter_mut().enumerate() {
             if let Some(ref rt_data) = layout.rt_data {
+                // Calculate offset from root
+                let offset_x = rt_data.final_y - root_layout_y; // In layout space
+                let offset_y = rt_data.final_x - root_layout_x; // In layout space
+
+                // Apply offset to fixed root position
                 // For LeftRight orientation: final_y becomes terminal x, final_x becomes terminal y
-                layout.x = ((rt_data.final_y - min_y) * scale + offset_x) as u16;
-                layout.y = ((rt_data.final_x - min_x) * scale + offset_y) as u16;
+                layout.x = (fixed_root_x as f32 + offset_x) as u16;
+                layout.y = (fixed_root_y as f32 + offset_y) as u16;
 
                 // Ensure coordinates are within bounds
                 layout.x = layout
@@ -712,7 +686,7 @@ impl LayoutManager {
             .map_or(0.0, |d| d.final_x)
     }
 
-    #[allow(dead_code)] // Used by validate_no_overlaps (debug builds only)
+    #[allow(dead_code)] // Used by validate_no_overlaps (debug builds only) and rt_to_terminal_coordinates
     fn get_rt_final_y(&self, node_id: usize) -> f32 {
         self.state.node_layouts[node_id]
             .rt_data
