@@ -27,11 +27,11 @@ pub struct NodeLayout {
 #[derive(Clone, Default)]
 pub struct RTNodeData {
     // Reingold-Tilford algorithm fields
-    pub prelim: f32,           // Preliminary horizontal position
-    pub modifier: f32,         // Modifier value for subtree positioning
-    pub subtree_width: f32,    // Width of entire subtree
-    pub subtree_height: f32,   // Height of entire subtree
-    
+    pub prelim: f32,         // Preliminary horizontal position
+    pub modifier: f32,       // Modifier value for subtree positioning
+    pub subtree_width: f32,  // Width of entire subtree
+    pub subtree_height: f32, // Height of entire subtree
+
     // Final coordinates
     pub final_x: f32,
     pub final_y: f32,
@@ -66,9 +66,9 @@ pub struct LayoutState {
 pub enum LayoutStrategy {
     ReingoldTilford {
         orientation: TreeOrientation,
-        node_separation: f32,     // Minimum distance between sibling nodes
-        level_separation: f32,    // Distance between tree levels
-        subtree_separation: f32,  // Minimum distance between subtrees
+        node_separation: f32,    // Minimum distance between sibling nodes
+        level_separation: f32,   // Distance between tree levels
+        subtree_separation: f32, // Minimum distance between subtrees
     },
     // Deprecated: Keep for migration compatibility
     #[deprecated(note = "Use ReingoldTilford strategy instead")]
@@ -110,9 +110,9 @@ impl Default for LayoutConfig {
             margin_left: 2,
             strategy: LayoutStrategy::ReingoldTilford {
                 orientation: TreeOrientation::LeftRight,
-                node_separation: 4.0,      // Vertical spacing between siblings
-                level_separation: 6.0,     // Horizontal spacing between levels
-                subtree_separation: 2.0,   // Extra space between subtrees
+                node_separation: 4.0,    // Vertical spacing between siblings
+                level_separation: 6.0,   // Horizontal spacing between levels
+                subtree_separation: 2.0, // Extra space between subtrees
             },
         }
     }
@@ -188,15 +188,51 @@ impl LayoutManager {
     fn calculate_rt_layout(&mut self, tree: &TreeStructure, terminal_size: (u16, u16)) {
         // Initialize RT data for all nodes
         self.initialize_rt_data(tree);
-        
-        // Phase 1: Calculate subtree dimensions and preliminary positions (postorder)
+
+        // Phase 1: Calculate preliminary positions (postorder)
         self.rt_first_walk(tree, tree.root);
-        
-        // Phase 2: Apply modifiers and set final positions (preorder)
+
+        // Phase 2: Apply modifiers to get final positions (preorder)
         self.rt_second_walk(tree, tree.root, 0.0, 0.0);
-        
+
+        // Phase 3: Calculate subtree dimensions based on final positions
+        self.rt_calculate_final_dimensions(tree, tree.root);
+
         // Convert to terminal coordinates
         self.rt_to_terminal_coordinates(tree, terminal_size);
+
+        // Validation (debug builds only)
+        #[cfg(debug_assertions)]
+        if let Err(msg) = self.validate_no_overlaps(tree) {
+            panic!("Layout validation failed: {}", msg);
+        }
+    }
+
+    fn validate_no_overlaps(&self, tree: &TreeStructure) -> Result<(), String> {
+        let min_separation = self.get_rt_node_separation();
+
+        for i in 0..tree.nodes.len() {
+            for j in (i + 1)..tree.nodes.len() {
+                let pos_i = self.get_rt_final_x(i);
+                let pos_j = self.get_rt_final_x(j);
+                let depth_i = self.get_rt_final_y(i);
+                let depth_j = self.get_rt_final_y(j);
+
+                // Check for overlaps on same level
+                if (depth_i - depth_j).abs() < 0.1 {
+                    // Same level
+                    let distance = (pos_i - pos_j).abs();
+                    if distance < min_separation {
+                        return Err(format!(
+                            "Nodes {} and {} overlap: distance={:.2}, required={:.2}",
+                            i, j, distance, min_separation
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn initialize_rt_data(&mut self, tree: &TreeStructure) {
@@ -219,79 +255,52 @@ impl LayoutManager {
 
     fn rt_first_walk(&mut self, tree: &TreeStructure, node_id: usize) {
         let children = tree.nodes[node_id].children.clone();
-        
+
         // Process all children first (postorder)
         for &child_id in &children {
             self.rt_first_walk(tree, child_id);
         }
-        
-        // Calculate subtree dimensions first
-        self.calculate_subtree_dimensions_initial(tree, node_id);
-        
+
+        // ONLY do positioning logic - NO dimension calculation
         if children.is_empty() {
-            // Leaf node
             self.set_leaf_position(node_id);
         } else {
-            // Internal node
             self.set_internal_position(tree, node_id);
         }
-        
-        // Debug output
-        let node_label = &tree.nodes[node_id].label;
-        let prelim = self.get_rt_prelim(node_id);
-        let subtree_width = self.get_rt_subtree_width(node_id);
-        println!("Node {} ({}): prelim={}, subtree_width={}", node_id, node_label, prelim, subtree_width);
-        
-        // Recalculate subtree dimensions after positioning
-        self.calculate_subtree_dimensions(tree, node_id);
-    }
 
-    fn calculate_subtree_dimensions_initial(&mut self, tree: &TreeStructure, node_id: usize) {
-        let children = &tree.nodes[node_id].children;
-        
-        if children.is_empty() {
-            // Leaf node: width = node width
-            let node_width = self.config.node_width as f32;
-            self.set_rt_subtree_width(node_id, node_width);
-            self.set_rt_subtree_height(node_id, self.config.node_height as f32);
-        } else {
-            // For internal nodes, calculate based on children
-            let total_child_width: f32 = children.iter()
-                .map(|&child_id| self.get_rt_subtree_width(child_id))
-                .sum();
-            
-            let separation = self.get_rt_node_separation();
-            let separations_needed = if children.len() > 1 { 
-                (children.len() - 1) as f32 * separation 
-            } else { 
-                0.0 
-            };
-            
-            let subtree_width = total_child_width + separations_needed;
-            self.set_rt_subtree_width(node_id, subtree_width.max(self.config.node_width as f32));
-            
-            // Height = max child height + current node height
-            let max_child_height = children.iter()
-                .map(|&child_id| self.get_rt_subtree_height(child_id))
-                .fold(0.0, f32::max);
-            
-            self.set_rt_subtree_height(node_id, max_child_height + self.config.node_height as f32);
-        }
+        // DO NOT call calculate_subtree_dimensions here!
     }
 
     fn rt_second_walk(&mut self, tree: &TreeStructure, node_id: usize, modifier: f32, depth: f32) {
         // Apply accumulated modifier to preliminary position
         let prelim = self.get_rt_prelim(node_id);
         let node_modifier = self.get_rt_modifier(node_id);
-        
+
         // Set final coordinates
         self.set_rt_final_coordinates(node_id, prelim + modifier, depth);
-        
+
         // Process children with accumulated modifier
         let level_separation = self.get_rt_level_separation();
         for &child_id in &tree.nodes[node_id].children {
-            self.rt_second_walk(tree, child_id, modifier + node_modifier, depth + level_separation);
+            self.rt_second_walk(
+                tree,
+                child_id,
+                modifier + node_modifier,
+                depth + level_separation,
+            );
         }
+    }
+
+    fn rt_calculate_final_dimensions(&mut self, tree: &TreeStructure, node_id: usize) {
+        let children = tree.nodes[node_id].children.clone();
+
+        // Process all children first (postorder)
+        for &child_id in &children {
+            self.rt_calculate_final_dimensions(tree, child_id);
+        }
+
+        // Calculate subtree dimensions based on final positioned coordinates
+        self.calculate_subtree_dimensions(tree, node_id);
     }
 
     fn set_leaf_position(&mut self, node_id: usize) {
@@ -302,81 +311,72 @@ impl LayoutManager {
 
     fn set_internal_position(&mut self, tree: &TreeStructure, node_id: usize) {
         let children = &tree.nodes[node_id].children;
-        let node_separation = self.get_rt_node_separation();
-        
+
         if children.len() == 1 {
             // Single child: position directly above it
             let child_prelim = self.get_rt_prelim(children[0]);
             self.set_rt_prelim(node_id, child_prelim);
             self.set_rt_modifier(node_id, 0.0);
         } else if children.len() >= 2 {
-            // First, position children with proper separation
-            self.position_children_with_separation(tree, node_id, node_separation);
-            
-            // Then center parent between first and last child
+            // Position children with fixed separation
+            self.position_children_with_fixed_separation(tree, node_id);
+
+            // Center parent between first and last child
             let first_child_pos = self.get_rt_prelim(children[0]);
             let last_child_pos = self.get_rt_prelim(children[children.len() - 1]);
             let midpoint = (first_child_pos + last_child_pos) / 2.0;
-            
+
             self.set_rt_prelim(node_id, midpoint);
             self.set_rt_modifier(node_id, 0.0);
         }
     }
 
-    fn position_children_with_separation(&mut self, tree: &TreeStructure, parent_id: usize, separation: f32) {
+    fn position_children_with_fixed_separation(&mut self, tree: &TreeStructure, parent_id: usize) {
         let children = &tree.nodes[parent_id].children;
-        
-        if children.is_empty() {
-            return;
-        }
-        
-        println!("Positioning children of node {} ({})", parent_id, tree.nodes[parent_id].label);
-        
-        // Position first child at origin relative to parent
-        self.set_rt_prelim(children[0], 0.0);
-        println!("  Child {} positioned at prelim=0", children[0]);
-        
-        // Position subsequent children with proper separation
-        for i in 1..children.len() {
-            let prev_child = children[i - 1];
-            let current_child = children[i];
-            
-            // Get the rightmost edge of the previous child's subtree
-            let prev_pos = self.get_rt_prelim(prev_child);
-            let prev_subtree_width = self.get_rt_subtree_width(prev_child);
-            
-            // Position current child with separation from previous subtree
-            let new_pos = prev_pos + prev_subtree_width + separation;
-            self.set_rt_prelim(current_child, new_pos);
-            
-            println!("  Child {} positioned at prelim={} (prev_pos={}, prev_width={}, sep={})", 
-                     current_child, new_pos, prev_pos, prev_subtree_width, separation);
+        let separation = self.get_rt_node_separation();
+
+        // Position children with fixed separation
+        for (i, &child_id) in children.iter().enumerate() {
+            let position = i as f32 * (self.config.node_width as f32 + separation);
+            self.set_rt_prelim(child_id, position);
         }
     }
 
     fn calculate_subtree_dimensions(&mut self, tree: &TreeStructure, node_id: usize) {
         let children = &tree.nodes[node_id].children;
-        
+
         if children.is_empty() {
             // Leaf node: width = node width
             let node_width = self.config.node_width as f32;
             self.set_rt_subtree_width(node_id, node_width);
             self.set_rt_subtree_height(node_id, self.config.node_height as f32);
         } else {
-            // Internal node: width = span of all children + separations
-            let first_child_pos = self.get_rt_prelim(children[0]);
-            let last_child = children[children.len() - 1];
-            let last_child_pos = self.get_rt_prelim(last_child);
-            let last_child_width = self.get_rt_subtree_width(last_child);
-            
-            let total_width = (last_child_pos + last_child_width) - first_child_pos;
-            self.set_rt_subtree_width(node_id, total_width);
-            
+            // Internal node: width = span of all children based on final coordinates
+            let mut min_x = f32::INFINITY;
+            let mut max_x = f32::NEG_INFINITY;
+
+            for &child_id in children {
+                let child_final_x = self.get_rt_final_x(child_id);
+                let child_width = self.get_rt_subtree_width(child_id);
+
+                min_x = min_x.min(child_final_x);
+                max_x = max_x.max(child_final_x + child_width);
+            }
+
+            let total_width = if min_x != f32::INFINITY && max_x != f32::NEG_INFINITY {
+                max_x - min_x
+            } else {
+                self.config.node_width as f32
+            };
+
+            self.set_rt_subtree_width(node_id, total_width.max(self.config.node_width as f32));
+
             // Height = max child height + current node height
-            let max_child_height = children.iter()
+            let max_child_height = children
+                .iter()
                 .map(|&child_id| self.get_rt_subtree_height(child_id))
                 .fold(0.0, f32::max);
-            
+
             self.set_rt_subtree_height(node_id, max_child_height + self.config.node_height as f32);
         }
     }
@@ -445,7 +445,10 @@ impl LayoutManager {
 
     // RT Data Access Methods
     fn get_rt_prelim(&self, node_id: usize) -> f32 {
-        self.state.node_layouts[node_id].rt_data.as_ref().map_or(0.0, |d| d.prelim)
+        self.state.node_layouts[node_id]
+            .rt_data
+            .as_ref()
+            .map_or(0.0, |d| d.prelim)
     }
 
     fn set_rt_prelim(&mut self, node_id: usize, value: f32) {
@@ -455,7 +458,10 @@ impl LayoutManager {
     }
 
     fn get_rt_modifier(&self, node_id: usize) -> f32 {
-        self.state.node_layouts[node_id].rt_data.as_ref().map_or(0.0, |d| d.modifier)
+        self.state.node_layouts[node_id]
+            .rt_data
+            .as_ref()
+            .map_or(0.0, |d| d.modifier)
     }
 
     fn set_rt_modifier(&mut self, node_id: usize, value: f32) {
@@ -465,7 +471,10 @@ impl LayoutManager {
     }
 
     fn get_rt_subtree_width(&self, node_id: usize) -> f32 {
-        self.state.node_layouts[node_id].rt_data.as_ref().map_or(0.0, |d| d.subtree_width)
+        self.state.node_layouts[node_id]
+            .rt_data
+            .as_ref()
+            .map_or(0.0, |d| d.subtree_width)
     }
 
     fn set_rt_subtree_width(&mut self, node_id: usize, value: f32) {
@@ -475,7 +484,10 @@ impl LayoutManager {
     }
 
     fn get_rt_subtree_height(&self, node_id: usize) -> f32 {
-        self.state.node_layouts[node_id].rt_data.as_ref().map_or(0.0, |d| d.subtree_height)
+        self.state.node_layouts[node_id]
+            .rt_data
+            .as_ref()
+            .map_or(0.0, |d| d.subtree_height)
     }
 
     fn set_rt_subtree_height(&mut self, node_id: usize, value: f32) {
@@ -491,27 +503,53 @@ impl LayoutManager {
         }
     }
 
+    fn get_rt_final_x(&self, node_id: usize) -> f32 {
+        self.state.node_layouts[node_id]
+            .rt_data
+            .as_ref()
+            .map_or(0.0, |d| d.final_x)
+    }
+
+    fn get_rt_final_y(&self, node_id: usize) -> f32 {
+        self.state.node_layouts[node_id]
+            .rt_data
+            .as_ref()
+            .map_or(0.0, |d| d.final_y)
+    }
+
     fn get_rt_node_separation(&self) -> f32 {
         match self.config.strategy {
-            LayoutStrategy::ReingoldTilford { node_separation, .. } => node_separation,
+            LayoutStrategy::ReingoldTilford {
+                node_separation, ..
+            } => node_separation,
             #[allow(deprecated)]
-            LayoutStrategy::BJL { sibling_separation, .. } => sibling_separation,
+            LayoutStrategy::BJL {
+                sibling_separation, ..
+            } => sibling_separation,
         }
     }
 
     fn get_rt_level_separation(&self) -> f32 {
         match self.config.strategy {
-            LayoutStrategy::ReingoldTilford { level_separation, .. } => level_separation,
+            LayoutStrategy::ReingoldTilford {
+                level_separation, ..
+            } => level_separation,
             #[allow(deprecated)]
-            LayoutStrategy::BJL { level_separation, .. } => level_separation,
+            LayoutStrategy::BJL {
+                level_separation, ..
+            } => level_separation,
         }
     }
 
     fn get_rt_subtree_separation(&self) -> f32 {
         match self.config.strategy {
-            LayoutStrategy::ReingoldTilford { subtree_separation, .. } => subtree_separation,
+            LayoutStrategy::ReingoldTilford {
+                subtree_separation, ..
+            } => subtree_separation,
             #[allow(deprecated)]
-            LayoutStrategy::BJL { subtree_separation, .. } => subtree_separation,
+            LayoutStrategy::BJL {
+                subtree_separation, ..
+            } => subtree_separation,
         }
     }
 }
@@ -528,6 +566,12 @@ impl LayoutConfig {
             },
             ..Default::default()
         }
+    }
+}
+
+impl Default for TreeStructure {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
