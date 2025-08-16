@@ -19,30 +19,35 @@ pub struct NodeLayout {
     pub y: u16,
     pub width: u16,
     pub height: u16,
-    pub subtree_width: u16,  // Total width needed for this subtree
-    pub subtree_height: u16, // Total height needed for this subtree
 
-    // BJL-specific data (optional for non-BJL layouts)
-    pub bjl_data: Option<BJLNodeData>,
+    // Reingold-Tilford specific data
+    pub rt_data: Option<RTNodeData>,
 }
 
 #[derive(Clone, Default)]
+pub struct RTNodeData {
+    // Reingold-Tilford algorithm fields
+    pub prelim: f32,           // Preliminary horizontal position
+    pub modifier: f32,         // Modifier value for subtree positioning
+    pub subtree_width: f32,    // Width of entire subtree
+    pub subtree_height: f32,   // Height of entire subtree
+    
+    // Final coordinates
+    pub final_x: f32,
+    pub final_y: f32,
+}
+
+// Deprecated: Keep for migration compatibility
+#[derive(Clone, Default)]
 pub struct BJLNodeData {
-    // Core BJL algorithm fields
-    pub prelim: f32,           // Preliminary x-coordinate
-    pub modifier: f32,         // Modifier for subtree positioning
-    pub thread: Option<usize>, // Thread to extreme subtree contour
-    pub ancestor: usize,       // Ancestor for conflict resolution
-
-    // Positioning refinement fields
-    pub shift: f32,  // Shift value for spacing adjustment
-    pub change: f32, // Change value for uniform distribution
-
-    // Tree structure navigation
+    pub prelim: f32,
+    pub modifier: f32,
+    pub thread: Option<usize>,
+    pub ancestor: usize,
+    pub shift: f32,
+    pub change: f32,
     pub left_sibling: Option<usize>,
     pub left_most_sibling: Option<usize>,
-
-    // Final floating-point coordinates (before terminal conversion)
     pub final_x: f32,
     pub final_y: f32,
 }
@@ -59,8 +64,15 @@ pub struct LayoutState {
 // Layout Strategy Types
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LayoutStrategy {
+    ReingoldTilford {
+        orientation: TreeOrientation,
+        node_separation: f32,     // Minimum distance between sibling nodes
+        level_separation: f32,    // Distance between tree levels
+        subtree_separation: f32,  // Minimum distance between subtrees
+    },
+    // Deprecated: Keep for migration compatibility
+    #[deprecated(note = "Use ReingoldTilford strategy instead")]
     BJL {
-        // Buchheim-Jünger-Leipert algorithm
         orientation: TreeOrientation,
         sibling_separation: f32,
         subtree_separation: f32,
@@ -96,11 +108,11 @@ impl Default for LayoutConfig {
             min_vertical_spacing: 4,   // Space between siblings (vertically)
             margin_top: 2,
             margin_left: 2,
-            strategy: LayoutStrategy::BJL {
+            strategy: LayoutStrategy::ReingoldTilford {
                 orientation: TreeOrientation::LeftRight,
-                sibling_separation: 4.0,
-                subtree_separation: 6.0,
-                level_separation: 6.0,
+                node_separation: 4.0,      // Vertical spacing between siblings
+                level_separation: 6.0,     // Horizontal spacing between levels
+                subtree_separation: 2.0,   // Extra space between subtrees
             },
         }
     }
@@ -143,8 +155,8 @@ impl LayoutManager {
             .resize(tree.nodes.len(), NodeLayout::default());
         self.state.subtree_dirty.resize(tree.nodes.len(), false);
 
-        // Use BJL algorithm
-        self.calculate_bjl_layout(tree, terminal_size);
+        // Use Reingold-Tilford algorithm
+        self.calculate_rt_layout(tree, terminal_size);
 
         // Mark as clean
         self.state.is_dirty = false;
@@ -172,231 +184,191 @@ impl LayoutManager {
         }
     }
 
-    // BJL Algorithm Implementation
-    fn calculate_bjl_layout(&mut self, tree: &TreeStructure, terminal_size: (u16, u16)) {
-        // Initialize BJL data for all nodes
-        self.initialize_bjl_data(tree);
-
-        // BJL Phase 1: First Walk (post-order)
-        self.bjl_first_walk(tree, tree.root);
-
-        // BJL Phase 2: Second Walk (pre-order)
-        self.bjl_second_walk(tree, tree.root, 0.0, 0.0);
-
+    // Reingold-Tilford Algorithm Implementation
+    fn calculate_rt_layout(&mut self, tree: &TreeStructure, terminal_size: (u16, u16)) {
+        // Initialize RT data for all nodes
+        self.initialize_rt_data(tree);
+        
+        // Phase 1: Calculate subtree dimensions and preliminary positions (postorder)
+        self.rt_first_walk(tree, tree.root);
+        
+        // Phase 2: Apply modifiers and set final positions (preorder)
+        self.rt_second_walk(tree, tree.root, 0.0, 0.0);
+        
         // Convert to terminal coordinates
-        self.bjl_to_terminal_coordinates(tree, terminal_size);
+        self.rt_to_terminal_coordinates(tree, terminal_size);
     }
 
-    fn initialize_bjl_data(&mut self, tree: &TreeStructure) {
-        // Initialize BJL data for each node
+    fn initialize_rt_data(&mut self, tree: &TreeStructure) {
+        // Initialize RT data for each node
         for (node_id, _node) in tree.nodes.iter().enumerate() {
             let layout = &mut self.state.node_layouts[node_id];
             layout.width = self.config.node_width;
             layout.height = self.config.node_height;
 
-            layout.bjl_data = Some(BJLNodeData {
+            layout.rt_data = Some(RTNodeData {
                 prelim: 0.0,
                 modifier: 0.0,
-                thread: None,
-                ancestor: node_id,
-                shift: 0.0,
-                change: 0.0,
-                left_sibling: None,
-                left_most_sibling: None,
+                subtree_width: 0.0,
+                subtree_height: 0.0,
                 final_x: 0.0,
                 final_y: 0.0,
             });
         }
-
-        // Set up sibling relationships
-        for parent_id in 0..tree.nodes.len() {
-            let children = tree.nodes[parent_id].children.clone();
-
-            for (i, &child_id) in children.iter().enumerate() {
-                if child_id < self.state.node_layouts.len() {
-                    if let Some(ref mut bjl_data) = self.state.node_layouts[child_id].bjl_data {
-                        // Set left sibling
-                        if i > 0 {
-                            bjl_data.left_sibling = Some(children[i - 1]);
-                        }
-
-                        // Set leftmost sibling
-                        if !children.is_empty() {
-                            bjl_data.left_most_sibling = Some(children[0]);
-                        }
-                    }
-                }
-            }
-        }
     }
 
-    fn bjl_first_walk(&mut self, tree: &TreeStructure, node_id: usize) {
-        if node_id >= tree.nodes.len() {
-            return;
-        }
-
+    fn rt_first_walk(&mut self, tree: &TreeStructure, node_id: usize) {
         let children = tree.nodes[node_id].children.clone();
-
-        // Process children first (post-order traversal)
+        
+        // Process all children first (postorder)
         for &child_id in &children {
-            self.bjl_first_walk(tree, child_id);
+            self.rt_first_walk(tree, child_id);
         }
-
+        
+        // Calculate subtree dimensions first
+        self.calculate_subtree_dimensions_initial(tree, node_id);
+        
         if children.is_empty() {
             // Leaf node
-            self.set_preliminary_position_leaf(node_id);
+            self.set_leaf_position(node_id);
         } else {
             // Internal node
-            self.set_preliminary_position_internal(tree, node_id);
-            self.execute_shifts(tree, node_id);
-            self.apportion(tree, node_id);
+            self.set_internal_position(tree, node_id);
         }
+        
+        // Recalculate subtree dimensions after positioning
+        self.calculate_subtree_dimensions(tree, node_id);
     }
 
-    fn bjl_second_walk(&mut self, tree: &TreeStructure, node_id: usize, modifier: f32, depth: f32) {
-        if node_id >= tree.nodes.len() {
-            return;
-        }
-
-        let level_separation = self.get_level_separation();
-
-        // Apply modifier and set final coordinates
-        let prelim = self.get_prelim(node_id);
-        let modifier_val = self.get_modifier(node_id);
-        self.set_final_coordinates(node_id, prelim + modifier, depth);
-
-        // Process children
-        for &child_id in &tree.nodes[node_id].children {
-            self.bjl_second_walk(
-                tree,
-                child_id,
-                modifier + modifier_val,
-                depth + level_separation,
-            );
-        }
-    }
-
-    fn execute_shifts(&mut self, tree: &TreeStructure, node_id: usize) {
-        let children = tree.nodes[node_id].children.clone();
-        let mut shift = 0.0;
-        let mut change = 0.0;
-
-        // Apply shifts from right to left
-        for &child_id in children.iter().rev() {
-            let child_shift = self.get_shift(child_id);
-            let child_change = self.get_change(child_id);
-
-            let child_prelim = self.get_prelim(child_id);
-            self.set_prelim(child_id, child_prelim + shift);
-            self.set_modifier(child_id, self.get_modifier(child_id) + shift);
-
-            change += child_change;
-            shift += child_shift + change;
-        }
-    }
-
-    fn apportion(&mut self, tree: &TreeStructure, node_id: usize) {
-        let children = tree.nodes[node_id].children.clone();
-
-        if children.len() <= 1 {
-            return;
-        }
-
-        // For simplicity, we'll use a basic apportion that ensures no overlaps
-        let subtree_separation = match self.config.strategy {
-            LayoutStrategy::BJL {
-                subtree_separation, ..
-            } => subtree_separation,
-        };
-
-        for i in 1..children.len() {
-            let current_child = children[i];
-            let prev_child = children[i - 1];
-
-            let current_prelim = self.get_prelim(current_child);
-            let prev_prelim = self.get_prelim(prev_child);
-
-            let min_distance = prev_prelim + subtree_separation;
-            if current_prelim < min_distance {
-                let shift_amount = min_distance - current_prelim;
-                self.shift_subtree(tree, current_child, shift_amount);
-            }
-        }
-    }
-
-    fn shift_subtree(&mut self, tree: &TreeStructure, root_id: usize, shift: f32) {
-        let current_prelim = self.get_prelim(root_id);
-        let current_modifier = self.get_modifier(root_id);
-        self.set_prelim(root_id, current_prelim + shift);
-        self.set_modifier(root_id, current_modifier + shift);
-
-        // Recursively shift all descendants
-        for &child_id in &tree.nodes[root_id].children {
-            self.shift_subtree(tree, child_id, shift);
-        }
-    }
-
-    fn set_preliminary_position_leaf(&mut self, node_id: usize) {
-        let left_sibling_id = if let Some(ref bjl_data) = self.state.node_layouts[node_id].bjl_data
-        {
-            bjl_data.left_sibling
+    fn calculate_subtree_dimensions_initial(&mut self, tree: &TreeStructure, node_id: usize) {
+        let children = &tree.nodes[node_id].children;
+        
+        if children.is_empty() {
+            // Leaf node: width = node width
+            let node_width = self.config.node_width as f32;
+            self.set_rt_subtree_width(node_id, node_width);
+            self.set_rt_subtree_height(node_id, self.config.node_height as f32);
         } else {
-            None
-        };
-
-        if let Some(left_sibling_id) = left_sibling_id {
-            let left_sibling_prelim = self.get_prelim(left_sibling_id);
-            let separation = match self.config.strategy {
-                LayoutStrategy::BJL {
-                    sibling_separation, ..
-                } => sibling_separation,
+            // For internal nodes, calculate based on children
+            let total_child_width: f32 = children.iter()
+                .map(|&child_id| self.get_rt_subtree_width(child_id))
+                .sum();
+            
+            let separation = self.get_rt_node_separation();
+            let separations_needed = if children.len() > 1 { 
+                (children.len() - 1) as f32 * separation 
+            } else { 
+                0.0 
             };
+            
+            let subtree_width = total_child_width + separations_needed;
+            self.set_rt_subtree_width(node_id, subtree_width.max(self.config.node_width as f32));
+            
+            // Height = max child height + current node height
+            let max_child_height = children.iter()
+                .map(|&child_id| self.get_rt_subtree_height(child_id))
+                .fold(0.0, f32::max);
+            
+            self.set_rt_subtree_height(node_id, max_child_height + self.config.node_height as f32);
+        }
+    }
 
-            self.set_prelim(node_id, left_sibling_prelim + separation);
+    fn rt_second_walk(&mut self, tree: &TreeStructure, node_id: usize, modifier: f32, depth: f32) {
+        // Apply accumulated modifier to preliminary position
+        let prelim = self.get_rt_prelim(node_id);
+        let node_modifier = self.get_rt_modifier(node_id);
+        
+        // Set final coordinates
+        self.set_rt_final_coordinates(node_id, prelim + modifier, depth);
+        
+        // Process children with accumulated modifier
+        let level_separation = self.get_rt_level_separation();
+        for &child_id in &tree.nodes[node_id].children {
+            self.rt_second_walk(tree, child_id, modifier + node_modifier, depth + level_separation);
+        }
+    }
+
+    fn set_leaf_position(&mut self, node_id: usize) {
+        // Leaf nodes are positioned at origin relative to their parent
+        self.set_rt_prelim(node_id, 0.0);
+        self.set_rt_modifier(node_id, 0.0);
+    }
+
+    fn set_internal_position(&mut self, tree: &TreeStructure, node_id: usize) {
+        let children = &tree.nodes[node_id].children;
+        let node_separation = self.get_rt_node_separation();
+        
+        if children.len() == 1 {
+            // Single child: position directly above it
+            let child_prelim = self.get_rt_prelim(children[0]);
+            self.set_rt_prelim(node_id, child_prelim);
+            self.set_rt_modifier(node_id, 0.0);
+        } else if children.len() >= 2 {
+            // Multiple children: center between first and last child
+            self.position_children_with_separation(tree, node_id, node_separation);
+            
+            let first_child_pos = self.get_rt_prelim(children[0]);
+            let last_child_pos = self.get_rt_prelim(children[children.len() - 1]);
+            let midpoint = (first_child_pos + last_child_pos) / 2.0;
+            
+            self.set_rt_prelim(node_id, midpoint);
+            self.set_rt_modifier(node_id, 0.0);
+        }
+    }
+
+    fn position_children_with_separation(&mut self, tree: &TreeStructure, parent_id: usize, separation: f32) {
+        let children = &tree.nodes[parent_id].children;
+        
+        if children.is_empty() {
+            return;
+        }
+        
+        // Position first child at origin
+        self.set_rt_prelim(children[0], 0.0);
+        
+        // Position subsequent children with proper separation
+        for i in 1..children.len() {
+            let prev_child = children[i - 1];
+            let current_child = children[i];
+            
+            // Get the rightmost edge of the previous child's subtree
+            let prev_pos = self.get_rt_prelim(prev_child);
+            let prev_subtree_width = self.get_rt_subtree_width(prev_child);
+            
+            // Position current child with separation from previous subtree
+            let new_pos = prev_pos + prev_subtree_width + separation;
+            self.set_rt_prelim(current_child, new_pos);
+        }
+    }
+
+    fn calculate_subtree_dimensions(&mut self, tree: &TreeStructure, node_id: usize) {
+        let children = &tree.nodes[node_id].children;
+        
+        if children.is_empty() {
+            // Leaf node: width = node width
+            let node_width = self.config.node_width as f32;
+            self.set_rt_subtree_width(node_id, node_width);
+            self.set_rt_subtree_height(node_id, self.config.node_height as f32);
         } else {
-            self.set_prelim(node_id, 0.0);
+            // Internal node: width = span of all children + separations
+            let first_child_pos = self.get_rt_prelim(children[0]);
+            let last_child = children[children.len() - 1];
+            let last_child_pos = self.get_rt_prelim(last_child);
+            let last_child_width = self.get_rt_subtree_width(last_child);
+            
+            let total_width = (last_child_pos + last_child_width) - first_child_pos;
+            self.set_rt_subtree_width(node_id, total_width);
+            
+            // Height = max child height + current node height
+            let max_child_height = children.iter()
+                .map(|&child_id| self.get_rt_subtree_height(child_id))
+                .fold(0.0, f32::max);
+            
+            self.set_rt_subtree_height(node_id, max_child_height + self.config.node_height as f32);
         }
     }
 
-    fn set_preliminary_position_internal(&mut self, tree: &TreeStructure, node_id: usize) {
-        let children = tree.nodes[node_id].children.clone();
-
-        if children.len() >= 2 {
-            let leftmost_child = children[0];
-            let rightmost_child = children[children.len() - 1];
-
-            let leftmost_prelim = self.get_prelim(leftmost_child);
-            let rightmost_prelim = self.get_prelim(rightmost_child);
-
-            // Position at midpoint of leftmost and rightmost children
-            let midpoint = (leftmost_prelim + rightmost_prelim) / 2.0;
-
-            let left_sibling_id =
-                if let Some(ref bjl_data) = self.state.node_layouts[node_id].bjl_data {
-                    bjl_data.left_sibling
-                } else {
-                    None
-                };
-
-            if let Some(left_sibling_id) = left_sibling_id {
-                let left_sibling_prelim = self.get_prelim(left_sibling_id);
-                let separation = match self.config.strategy {
-                    LayoutStrategy::BJL {
-                        sibling_separation, ..
-                    } => sibling_separation,
-                };
-
-                let new_prelim = left_sibling_prelim + separation;
-                let modifier = new_prelim - midpoint;
-                self.set_prelim(node_id, new_prelim);
-                self.set_modifier(node_id, modifier);
-            } else {
-                self.set_prelim(node_id, midpoint);
-                self.set_modifier(node_id, 0.0);
-            }
-        }
-    }
-    fn bjl_to_terminal_coordinates(&mut self, tree: &TreeStructure, terminal_size: (u16, u16)) {
+    fn rt_to_terminal_coordinates(&mut self, tree: &TreeStructure, terminal_size: (u16, u16)) {
         if tree.nodes.is_empty() {
             return;
         }
@@ -408,11 +380,11 @@ impl LayoutManager {
         let mut max_y = f32::NEG_INFINITY;
 
         for layout in &self.state.node_layouts {
-            if let Some(ref bjl_data) = layout.bjl_data {
-                min_x = min_x.min(bjl_data.final_x);
-                max_x = max_x.max(bjl_data.final_x);
-                min_y = min_y.min(bjl_data.final_y);
-                max_y = max_y.max(bjl_data.final_y);
+            if let Some(ref rt_data) = layout.rt_data {
+                min_x = min_x.min(rt_data.final_x);
+                max_x = max_x.max(rt_data.final_x);
+                min_y = min_y.min(rt_data.final_y);
+                max_y = max_y.max(rt_data.final_y);
             }
         }
 
@@ -440,12 +412,12 @@ impl LayoutManager {
         let offset_y =
             self.config.margin_top as f32 + (available_height - layout_height * scale) / 2.0;
 
-        // Convert to terminal coordinates
+        // Convert to terminal coordinates for left-to-right layout
         for layout in &mut self.state.node_layouts {
-            if let Some(ref bjl_data) = layout.bjl_data {
-                // For LeftRight orientation: x is horizontal position, y is vertical position
-                layout.x = ((bjl_data.final_y - min_y) * scale + offset_x) as u16;
-                layout.y = ((bjl_data.final_x - min_x) * scale + offset_y) as u16;
+            if let Some(ref rt_data) = layout.rt_data {
+                // For LeftRight orientation: final_y becomes terminal x, final_x becomes terminal y
+                layout.x = ((rt_data.final_y - min_y) * scale + offset_x) as u16;
+                layout.y = ((rt_data.final_x - min_x) * scale + offset_y) as u16;
 
                 // Ensure coordinates are within bounds
                 layout.x = layout
@@ -458,59 +430,90 @@ impl LayoutManager {
         }
     }
 
-    // Helper methods for BJL algorithm
-    fn get_prelim(&self, node_id: usize) -> f32 {
-        self.state.node_layouts[node_id]
-            .bjl_data
-            .as_ref()
-            .map_or(0.0, |d| d.prelim)
+    // RT Data Access Methods
+    fn get_rt_prelim(&self, node_id: usize) -> f32 {
+        self.state.node_layouts[node_id].rt_data.as_ref().map_or(0.0, |d| d.prelim)
     }
 
-    fn set_prelim(&mut self, node_id: usize, value: f32) {
-        if let Some(ref mut bjl_data) = self.state.node_layouts[node_id].bjl_data {
-            bjl_data.prelim = value;
+    fn set_rt_prelim(&mut self, node_id: usize, value: f32) {
+        if let Some(ref mut rt_data) = self.state.node_layouts[node_id].rt_data {
+            rt_data.prelim = value;
         }
     }
 
-    fn get_modifier(&self, node_id: usize) -> f32 {
-        self.state.node_layouts[node_id]
-            .bjl_data
-            .as_ref()
-            .map_or(0.0, |d| d.modifier)
+    fn get_rt_modifier(&self, node_id: usize) -> f32 {
+        self.state.node_layouts[node_id].rt_data.as_ref().map_or(0.0, |d| d.modifier)
     }
 
-    fn set_modifier(&mut self, node_id: usize, value: f32) {
-        if let Some(ref mut bjl_data) = self.state.node_layouts[node_id].bjl_data {
-            bjl_data.modifier = value;
+    fn set_rt_modifier(&mut self, node_id: usize, value: f32) {
+        if let Some(ref mut rt_data) = self.state.node_layouts[node_id].rt_data {
+            rt_data.modifier = value;
         }
     }
 
-    fn get_shift(&self, node_id: usize) -> f32 {
-        self.state.node_layouts[node_id]
-            .bjl_data
-            .as_ref()
-            .map_or(0.0, |d| d.shift)
+    fn get_rt_subtree_width(&self, node_id: usize) -> f32 {
+        self.state.node_layouts[node_id].rt_data.as_ref().map_or(0.0, |d| d.subtree_width)
     }
 
-    fn get_change(&self, node_id: usize) -> f32 {
-        self.state.node_layouts[node_id]
-            .bjl_data
-            .as_ref()
-            .map_or(0.0, |d| d.change)
-    }
-
-    fn set_final_coordinates(&mut self, node_id: usize, x: f32, y: f32) {
-        if let Some(ref mut bjl_data) = self.state.node_layouts[node_id].bjl_data {
-            bjl_data.final_x = x;
-            bjl_data.final_y = y;
+    fn set_rt_subtree_width(&mut self, node_id: usize, value: f32) {
+        if let Some(ref mut rt_data) = self.state.node_layouts[node_id].rt_data {
+            rt_data.subtree_width = value;
         }
     }
 
-    fn get_level_separation(&self) -> f32 {
+    fn get_rt_subtree_height(&self, node_id: usize) -> f32 {
+        self.state.node_layouts[node_id].rt_data.as_ref().map_or(0.0, |d| d.subtree_height)
+    }
+
+    fn set_rt_subtree_height(&mut self, node_id: usize, value: f32) {
+        if let Some(ref mut rt_data) = self.state.node_layouts[node_id].rt_data {
+            rt_data.subtree_height = value;
+        }
+    }
+
+    fn set_rt_final_coordinates(&mut self, node_id: usize, x: f32, y: f32) {
+        if let Some(ref mut rt_data) = self.state.node_layouts[node_id].rt_data {
+            rt_data.final_x = x;
+            rt_data.final_y = y;
+        }
+    }
+
+    fn get_rt_node_separation(&self) -> f32 {
         match self.config.strategy {
-            LayoutStrategy::BJL {
-                level_separation, ..
-            } => level_separation,
+            LayoutStrategy::ReingoldTilford { node_separation, .. } => node_separation,
+            #[allow(deprecated)]
+            LayoutStrategy::BJL { sibling_separation, .. } => sibling_separation,
+        }
+    }
+
+    fn get_rt_level_separation(&self) -> f32 {
+        match self.config.strategy {
+            LayoutStrategy::ReingoldTilford { level_separation, .. } => level_separation,
+            #[allow(deprecated)]
+            LayoutStrategy::BJL { level_separation, .. } => level_separation,
+        }
+    }
+
+    fn get_rt_subtree_separation(&self) -> f32 {
+        match self.config.strategy {
+            LayoutStrategy::ReingoldTilford { subtree_separation, .. } => subtree_separation,
+            #[allow(deprecated)]
+            LayoutStrategy::BJL { subtree_separation, .. } => subtree_separation,
+        }
+    }
+}
+
+impl LayoutConfig {
+    #[deprecated(note = "Use ReingoldTilford strategy instead")]
+    pub fn bjl_left_right() -> Self {
+        Self {
+            strategy: LayoutStrategy::ReingoldTilford {
+                orientation: TreeOrientation::LeftRight,
+                node_separation: 4.0,
+                level_separation: 6.0,
+                subtree_separation: 2.0,
+            },
+            ..Default::default()
         }
     }
 }
