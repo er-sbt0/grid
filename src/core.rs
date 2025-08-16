@@ -367,8 +367,9 @@ impl LayoutManager {
             return;
         }
 
-        // Position first child at origin
-        self.set_rt_prelim(children[0], 0.0);
+        // First pass: Calculate positions starting from 0 to determine total width
+        let mut child_positions = vec![0.0; children.len()];
+        child_positions[0] = 0.0;
 
         // Position subsequent children using contour-based conflict detection
         for i in 1..children.len() {
@@ -384,10 +385,18 @@ impl LayoutManager {
             );
 
             // Position current child at the calculated distance from left sibling
-            let left_sibling_pos = self.get_rt_prelim(left_sibling);
-            let new_pos = left_sibling_pos + min_distance;
+            let left_sibling_pos = child_positions[i - 1];
+            child_positions[i] = left_sibling_pos + min_distance;
+        }
 
-            self.set_rt_prelim(current_child, new_pos);
+        // Calculate the total width and center offset for symmetrical layout
+        let total_width = child_positions[children.len() - 1] - child_positions[0];
+        let center_offset = -total_width / 2.0;
+
+        // Apply the centering offset to all children to create symmetrical layout
+        for (i, &child_id) in children.iter().enumerate() {
+            let centered_position = child_positions[i] + center_offset;
+            self.set_rt_prelim(child_id, centered_position);
         }
     }
 
