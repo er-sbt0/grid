@@ -1,6 +1,10 @@
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use grid::{LayoutConfig, LayoutManager, TreeNode, TreeStructure};
-use ratatui::{style::Color, text::Text};
+use ratatui::{
+    style::{Color, Style},
+    text::Text,
+    widgets::{Block, Paragraph},
+};
 
 // Main Application Structure
 struct TreeApp {
@@ -81,59 +85,40 @@ fn draw_node_at_position(
     is_current: bool,
     area: ratatui::layout::Rect,
 ) {
-    let node_size = 3; // 3x3 square
+    // Calculate node dimensions - width based on label, height is 3 (border + text + border)
+    let node_width = (node.label.len() + 2) as u16; // +2 for left and right borders
+    let node_height = 3u16; // Single line node with top and bottom borders
 
-    // Check if the node is within the visible area (with some margin for partial visibility)
-    if x < -(node_size as i32)
-        || y < -(node_size as i32)
-        || x >= area.width as i32
-        || y >= area.height as i32
-    {
+    // Check if the node is within the visible area
+    if x < 0 || y < 0 || x as u16 >= area.width || y as u16 >= area.height {
         return; // Node is completely outside visible area
     }
 
-    // Choose color based on whether this is the current node
-    let color = if is_current {
-        Color::Green
+    // Choose style based on whether this is the current node
+    let style = if is_current {
+        Style::default().fg(Color::Black).bg(Color::Green)
     } else {
-        Color::Cyan
+        Style::default().fg(Color::Cyan)
     };
 
-    // Draw the square node
-    let lines = ["┌─┐", "│ │", "└─┘"];
+    // Create a block (rectangle) with the node label inside
+    let block = Block::bordered().style(style);
+    
+    // Create paragraph with the label
+    let paragraph = Paragraph::new(node.label.as_str())
+        .block(block)
+        .style(style);
 
-    for (i, line) in lines.iter().enumerate() {
-        let y_pos = y + i as i32;
-        if y_pos >= 0 && y_pos < area.height as i32 && x >= 0 && x < area.width as i32 {
-            let text = Text::from(line.to_string()).style(color);
-            let line_area = ratatui::layout::Rect {
-                x: x as u16,
-                y: y_pos as u16,
-                width: node_size.min((area.width as i32 - x).max(0) as u16),
-                height: 1,
-            };
-            frame.render_widget(text, line_area);
-        }
-    }
+    // Calculate the area for this node
+    let node_area = ratatui::layout::Rect {
+        x: x as u16,
+        y: y as u16,
+        width: node_width.min(area.width.saturating_sub(x as u16)),
+        height: node_height.min(area.height.saturating_sub(y as u16)),
+    };
 
-    // Draw the label below the node
-    let label_y = y + node_size as i32;
-    if label_y >= 0 && label_y < area.height as i32 && x >= 0 && x < area.width as i32 {
-        let label_color = if is_current {
-            Color::Green
-        } else {
-            Color::Yellow
-        };
-        let label_text = Text::from(node.label.clone()).style(label_color);
-        let label_width = node.label.len() as u16;
-        let label_area = ratatui::layout::Rect {
-            x: x as u16,
-            y: label_y as u16,
-            width: label_width.min((area.width as i32 - x).max(0) as u16),
-            height: 1,
-        };
-        frame.render_widget(label_text, label_area);
-    }
+    // Render the widget
+    frame.render_widget(paragraph, node_area);
 }
 
 fn draw_connection(
@@ -142,10 +127,12 @@ fn draw_connection(
     to_pos: (i32, i32),
     area: ratatui::layout::Rect,
 ) {
-    let from_x = from_pos.0 + 2; // Connect from right edge of source node (middle of 3-wide node)
-    let from_y = from_pos.1 + 1; // Connect from middle of source node (middle of 3-high node)
+    // Adjust connection points for the new 3-high node structure
+    // Connect from the right middle of the source node
+    let from_x = from_pos.0 + 2; // Connect from right edge 
+    let from_y = from_pos.1 + 1; // Middle of 3-high node
     let to_x = to_pos.0; // Connect to left edge of target node
-    let to_y = to_pos.1 + 1; // Connect to middle of target node
+    let to_y = to_pos.1 + 1; // Middle of 3-high node
 
     // Draw horizontal line from source to intermediate point
     let mid_x = (from_x + to_x) / 2;
