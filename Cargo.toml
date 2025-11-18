@@ -7,11 +7,6 @@ edition = "2021"
 name = "grid"
 path = "src/lib.rs"
 
-[[bin]]
-name = "grid"
-path = "src/main.rs"
-required-features = ["rendering"]
-
 [[example]]
 name = "basic_rendering"
 required-features = ["rendering"]
