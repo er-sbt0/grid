@@ -31,10 +31,26 @@ pub fn render_edge_path(
 ) {
     // Render segments with awareness of adjacent corners to avoid overlaps
     for (i, segment) in path.segments.iter().enumerate() {
-        let has_corner_before = i > 0 && matches!(path.segments[i - 1].segment_type, EdgeSegmentType::Corner(_));
-        let has_corner_after = i + 1 < path.segments.len() && matches!(path.segments[i + 1].segment_type, EdgeSegmentType::Corner(_));
-        
-        render_edge_segment_with_context(buf, segment, has_corner_before, has_corner_after, viewport, area, style);
+        let has_corner_before = i > 0
+            && matches!(
+                path.segments[i - 1].segment_type,
+                EdgeSegmentType::Corner(_)
+            );
+        let has_corner_after = i + 1 < path.segments.len()
+            && matches!(
+                path.segments[i + 1].segment_type,
+                EdgeSegmentType::Corner(_)
+            );
+
+        render_edge_segment_with_context(
+            buf,
+            segment,
+            has_corner_before,
+            has_corner_after,
+            viewport,
+            area,
+            style,
+        );
     }
 }
 
@@ -52,24 +68,24 @@ fn render_edge_segment_with_context(
 
     match segment.segment_type {
         Horizontal => render_horizontal_line_with_context(
-            buf, 
-            segment.from, 
-            segment.to, 
-            has_corner_before, 
-            has_corner_after, 
-            viewport, 
-            area, 
-            style
+            buf,
+            segment.from,
+            segment.to,
+            has_corner_before,
+            has_corner_after,
+            viewport,
+            area,
+            style,
         ),
         Vertical => render_vertical_line_with_context(
-            buf, 
-            segment.from, 
-            segment.to, 
-            has_corner_before, 
-            has_corner_after, 
-            viewport, 
-            area, 
-            style
+            buf,
+            segment.from,
+            segment.to,
+            has_corner_before,
+            has_corner_after,
+            viewport,
+            area,
+            style,
         ),
         Corner(corner_type) => render_corner(buf, segment.from, corner_type, viewport, area, style),
     }
